@@ -25,6 +25,16 @@ from .surface_features import (
     classify_surface_type,
     print_feature_summary,
 )
+from .spatial_hash import (
+    SpatialHashGrid,
+    AcceleratedCubeCounter,
+    create_counter,
+)
+from .fast_counting import (
+    FastCubeCounter,
+    count_cubes_fast,
+    check_numba_available,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -45,4 +55,12 @@ __all__ = [
     "ConnectedComponent",
     "classify_surface_type",
     "print_feature_summary",
+    # Spatial acceleration
+    "SpatialHashGrid",
+    "AcceleratedCubeCounter",
+    "create_counter",
+    # Fast counting (Numba)
+    "FastCubeCounter",
+    "count_cubes_fast",
+    "check_numba_available",
 ]
