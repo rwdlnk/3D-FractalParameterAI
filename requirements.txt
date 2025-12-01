@@ -10,6 +10,9 @@ matplotlib>=3.5.0
 # Machine learning / AI
 scikit-learn>=1.0.0
 
+# Performance acceleration (optional but recommended)
+numba>=0.56.0
+
 # Data handling
 pandas>=1.3.0
 

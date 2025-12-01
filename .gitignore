@@ -137,10 +137,13 @@ cython_debug/
 
 # Project-specific
 *.vtk
+*.vtp
 *.vtu
 *.pvd
+*.stl
 results/
 output/
+data/
 *.jsonl
 !feedback_data.jsonl
 experiments/*/output/
