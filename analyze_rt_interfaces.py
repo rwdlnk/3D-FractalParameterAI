@@ -54,7 +54,12 @@ def extract_time_from_filename(filename: str) -> Optional[float]:
 def find_vtp_files(path: str, t_min: Optional[float] = None,
                    t_max: Optional[float] = None) -> List[Tuple[float, str]]:
     """
-    Find VTP files in directory, optionally filtering by time range.
+    Find VTP/VTK files in directory, optionally filtering by time range.
+
+    Supports:
+    - Single VTP/VTK file
+    - Directory with VTP files named like interface_t5.0000.vtp
+    - OpenFOAM postProcessing structure: path/0.2/interface.vtk, path/0.4/interface.vtk, etc.
 
     Returns:
         List of (time, filepath) tuples, sorted by time
@@ -66,18 +71,40 @@ def find_vtp_files(path: str, t_min: Optional[float] = None,
             return [(t, path)]
         return [(0.0, path)]
 
-    # Directory
+    # Directory - check for OpenFOAM postProcessing structure first
+    # (subdirectories named by time values containing .vtk files)
     files = []
-    for f in os.listdir(path):
-        if f.endswith('.vtp'):
-            t = extract_time_from_filename(f)
+
+    for item in os.listdir(path):
+        item_path = os.path.join(path, item)
+
+        # Check if item is a time directory (OpenFOAM structure)
+        if os.path.isdir(item_path):
+            try:
+                t = float(item)
+                # Apply time filter
+                if t_min is not None and t < t_min:
+                    continue
+                if t_max is not None and t > t_max:
+                    continue
+                # Look for VTK/VTP files in this time directory
+                for f in os.listdir(item_path):
+                    if f.endswith('.vtk') or f.endswith('.vtp'):
+                        files.append((t, os.path.join(item_path, f)))
+                        break  # Take first VTK/VTP file found
+            except ValueError:
+                pass  # Not a time directory
+
+        # Also check for VTP/VTK files directly in the directory
+        elif item.endswith('.vtp') or item.endswith('.vtk'):
+            t = extract_time_from_filename(item)
             if t is not None:
                 # Apply time filter
                 if t_min is not None and t < t_min:
                     continue
                 if t_max is not None and t > t_max:
                     continue
-                files.append((t, os.path.join(path, f)))
+                files.append((t, item_path))
 
     return sorted(files, key=lambda x: x[0])
 
@@ -189,7 +216,7 @@ def analyze_directory(path: str, t_min: Optional[float] = None,
     files = find_vtp_files(path, t_min, t_max)
 
     if not files:
-        print(f"No VTP files found in {path}")
+        print(f"No VTP/VTK files found in {path}")
         return []
 
     if verbose:
