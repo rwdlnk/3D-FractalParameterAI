@@ -37,8 +37,10 @@ from .fast_counting import (
 )
 from .multifractal_3d import (
     MultifractalAnalyzer3D,
-    MultifractalSpectrum3D,
-    analyze_mesh_multifractal,
+    MultifractalResult3D,
+    MultifractalSpectrum3D,  # Legacy alias
+    analyze_multifractal_3d,
+    analyze_mesh_multifractal,  # Legacy alias
 )
 
 __version__ = "0.1.0"
@@ -70,6 +72,8 @@ __all__ = [
     "check_numba_available",
     # Multifractal analysis
     "MultifractalAnalyzer3D",
+    "MultifractalResult3D",
     "MultifractalSpectrum3D",
+    "analyze_multifractal_3d",
     "analyze_mesh_multifractal",
 ]
