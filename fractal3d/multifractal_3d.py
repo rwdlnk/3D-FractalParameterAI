@@ -65,6 +65,7 @@ class MultifractalResult3D:
     measure_type: str        # 'count' or 'area'
     cube_sizes: np.ndarray   # Cube sizes used
     n_occupied: List[int]    # Number of occupied cubes per scale
+    cube_sizes_nondim: Optional[np.ndarray] = None  # Nondimensional cube sizes (delta/H)
 
 
 # Legacy alias for backward compatibility
@@ -282,6 +283,7 @@ class MultifractalAnalyzer3D:
         num_scales: int = 12,
         min_delta: Optional[float] = None,
         max_delta: Optional[float] = None,
+        rt_physics=None,
     ) -> MultifractalResult3D:
         """
         Compute the full multifractal spectrum of a 3D surface.
@@ -293,6 +295,7 @@ class MultifractalAnalyzer3D:
             num_scales: Number of scales to analyze
             min_delta: Minimum cube size (default: char_length / 200)
             max_delta: Maximum cube size (default: char_length / 2)
+            rt_physics: Optional RTPhysics3D instance for nondimensional cube sizes
 
         Returns:
             MultifractalResult3D with complete spectrum
@@ -454,6 +457,10 @@ class MultifractalAnalyzer3D:
             else:
                 self._log(f"  -> Surface appears monofractal")
 
+        cube_sizes_nondim = None
+        if rt_physics is not None:
+            cube_sizes_nondim = rt_physics.nondim_cube_size(cube_sizes)
+
         return MultifractalResult3D(
             q_values=q_values,
             tau=taus,
@@ -469,6 +476,7 @@ class MultifractalAnalyzer3D:
             measure_type=self.measure,
             cube_sizes=cube_sizes,
             n_occupied=n_occupied_list,
+            cube_sizes_nondim=cube_sizes_nondim,
         )
 
     # Legacy API compatibility

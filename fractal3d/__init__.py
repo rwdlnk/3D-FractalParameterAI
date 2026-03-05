@@ -42,6 +42,7 @@ from .multifractal_3d import (
     analyze_multifractal_3d,
     analyze_mesh_multifractal,  # Legacy alias
 )
+from .rt_physics import RTPhysics3D
 
 __version__ = "0.1.0"
 __all__ = [
@@ -76,4 +77,6 @@ __all__ = [
     "MultifractalSpectrum3D",
     "analyze_multifractal_3d",
     "analyze_mesh_multifractal",
+    # RT physics nondimensionalization
+    "RTPhysics3D",
 ]
