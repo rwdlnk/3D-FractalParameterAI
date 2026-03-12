@@ -47,6 +47,12 @@ except ImportError:
             return func
         return decorator
 
+# Try to import GPU acceleration
+try:
+    from .fast_counting_gpu import HAS_CUDA, compute_cube_measures_gpu
+except ImportError:
+    HAS_CUDA = False
+
 
 @dataclass
 class MultifractalResult3D:
@@ -169,19 +175,29 @@ class MultifractalAnalyzer3D:
     - 'area': triangle area distributed among cubes (surface area density)
     """
 
-    def __init__(self, measure: str = 'area', verbose: bool = True):
+    def __init__(self, measure: str = 'area', verbose: bool = True,
+                 use_gpu: str = 'auto'):
         """
         Initialize 3D multifractal analyzer.
 
         Args:
             measure: Measure type - 'count' or 'area'
             verbose: Print progress information
+            use_gpu: 'auto' (GPU if available), 'always', or 'never'
         """
         if measure not in ('count', 'area'):
             raise ValueError(f"measure must be 'count' or 'area', got '{measure}'")
         self.measure = measure
         self.verbose = verbose
         self._D1_direct = np.nan  # Storage for q=1 result
+        if use_gpu == 'auto':
+            self._use_gpu = HAS_CUDA
+        elif use_gpu == 'always':
+            if not HAS_CUDA:
+                raise RuntimeError("GPU requested but CUDA is not available")
+            self._use_gpu = True
+        else:
+            self._use_gpu = False
 
     def _log(self, msg: str):
         if self.verbose:
@@ -209,6 +225,19 @@ class MultifractalAnalyzer3D:
         """
         if domain is None:
             domain = mesh.bbox
+
+        # GPU path
+        if self._use_gpu:
+            all_verts = mesh.get_all_triangle_vertices().astype(np.float64)
+            areas = mesh.triangle_areas().astype(np.float64)
+            domain_min = np.array([domain.min_x, domain.min_y, domain.min_z],
+                                  dtype=np.float64)
+            domain_max = np.array([domain.max_x, domain.max_y, domain.max_z],
+                                  dtype=np.float64)
+            return compute_cube_measures_gpu(
+                all_verts, areas, delta, domain_min, domain_max,
+                measure=self.measure
+            )
 
         nx = max(1, int(np.ceil(domain.width / delta)))
         ny = max(1, int(np.ceil(domain.height / delta)))
@@ -309,7 +338,7 @@ class MultifractalAnalyzer3D:
         if min_delta is None:
             min_delta = char_len / 200
         if max_delta is None:
-            max_delta = char_len / 2
+            max_delta = char_len / 10
 
         # Generate geometric sequence of cube sizes (large to small)
         cube_sizes = []
@@ -410,22 +439,41 @@ class MultifractalAnalyzer3D:
         alpha = np.full(len(q_values), np.nan)
         f_alpha_arr = np.full(len(q_values), np.nan)
 
-        for i in range(len(q_values)):
-            if np.isnan(taus[i]):
-                continue
-            # alpha = -d(tau)/dq (numerical derivative)
-            if 0 < i < len(q_values) - 1:
-                if not np.isnan(taus[i-1]) and not np.isnan(taus[i+1]):
-                    alpha[i] = -(taus[i+1] - taus[i-1]) / (q_values[i+1] - q_values[i-1])
-            elif i == 0:
-                if not np.isnan(taus[i+1]):
-                    alpha[i] = -(taus[i+1] - taus[i]) / (q_values[i+1] - q_values[i])
-            else:
-                if not np.isnan(taus[i-1]):
-                    alpha[i] = -(taus[i] - taus[i-1]) / (q_values[i] - q_values[i-1])
+        # Spline fit for smooth derivatives (matching 2D analyzer)
+        valid_mask = ~np.isnan(taus)
+        if np.sum(valid_mask) >= 4:
+            q_valid = q_values[valid_mask]
+            tau_valid = taus[valid_mask]
 
-            if not np.isnan(alpha[i]):
-                f_alpha_arr[i] = q_values[i] * alpha[i] + taus[i]
+            from scipy.interpolate import UnivariateSpline
+            try:
+                spline = UnivariateSpline(q_valid, tau_valid, k=3, s=0)
+                dtau_dq = spline.derivative()(q_valid)
+
+                j = 0
+                for i in range(len(q_values)):
+                    if valid_mask[i]:
+                        alpha[i] = dtau_dq[j]
+                        f_alpha_arr[i] = q_values[i] * alpha[i] - taus[i]
+                        j += 1
+            except Exception:
+                # Fallback: finite differences
+                for i in range(len(q_values)):
+                    if np.isnan(taus[i]):
+                        continue
+                    # alpha = d(tau)/dq
+                    if 0 < i < len(q_values) - 1:
+                        if not np.isnan(taus[i-1]) and not np.isnan(taus[i+1]):
+                            alpha[i] = (taus[i+1] - taus[i-1]) / (q_values[i+1] - q_values[i-1])
+                    elif i == 0:
+                        if not np.isnan(taus[i+1]):
+                            alpha[i] = (taus[i+1] - taus[i]) / (q_values[i+1] - q_values[i])
+                    else:
+                        if not np.isnan(taus[i-1]):
+                            alpha[i] = (taus[i] - taus[i-1]) / (q_values[i] - q_values[i-1])
+
+                    if not np.isnan(alpha[i]):
+                        f_alpha_arr[i] = q_values[i] * alpha[i] - taus[i]
 
         # Step 5: Extract key dimensions
         def _get_Dq(q_target):
