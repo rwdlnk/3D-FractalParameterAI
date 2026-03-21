@@ -34,6 +34,7 @@ from .fast_counting import (
     FastCubeCounter,
     count_cubes_fast,
     check_numba_available,
+    check_cuda_available,
 )
 from .multifractal_3d import (
     MultifractalAnalyzer3D,
@@ -71,6 +72,7 @@ __all__ = [
     "FastCubeCounter",
     "count_cubes_fast",
     "check_numba_available",
+    "check_cuda_available",
     # Multifractal analysis
     "MultifractalAnalyzer3D",
     "MultifractalResult3D",

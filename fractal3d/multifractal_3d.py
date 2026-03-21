@@ -170,6 +170,11 @@ class MultifractalAnalyzer3D:
     Uses cube-based partition functions with the Separating Axis Theorem
     (Akenine-Moller) for triangle-cube intersection testing.
 
+    Grid optimization: tests multiple cube-grid offsets per scale and
+    selects the offset with minimum occupied cube count, matching the
+    validated monofractal approach (Theiler 1990) for consistency between
+    D₀ and the dedicated box-counting fractal dimension.
+
     Supports two measure types:
     - 'count': triangle count per cube (interface complexity density)
     - 'area': triangle area distributed among cubes (surface area density)
@@ -202,6 +207,16 @@ class MultifractalAnalyzer3D:
     def _log(self, msg: str):
         if self.verbose:
             print(msg)
+
+    @staticmethod
+    def _get_grid_offsets(delta: float) -> np.ndarray:
+        """Get adaptive grid offset fractions based on cube size (matches 2D FractalAnalyzer)."""
+        if delta < 0.005:
+            return np.linspace(0, 0.75, 4)  # 4^3 = 64 tests
+        elif delta < 0.02:
+            return np.linspace(0, 0.5, 3)   # 3^3 = 27 tests
+        else:
+            return np.linspace(0, 0.5, 2)   # 2^3 = 8 tests
 
     def compute_cube_measures(self, mesh: TriangleMesh, delta: float,
                               domain: Optional[BoundingBox3D] = None
@@ -304,6 +319,67 @@ class MultifractalAnalyzer3D:
         measures = np.array(list(cube_measures.values()), dtype=np.float64)
         return measures, len(measures)
 
+    def compute_cube_measures_grid_optimized(
+        self, mesh: TriangleMesh, delta: float,
+        domain: Optional[BoundingBox3D] = None
+    ) -> Tuple[np.ndarray, int, int]:
+        """
+        Compute cube measures with grid optimization — multiple offsets, take minimum N.
+
+        Tests multiple cube-grid offsets and selects the one with the minimum
+        number of occupied cubes, returning that offset's full measure distribution.
+        This matches the validated monofractal approach (Theiler 1990).
+
+        Args:
+            mesh: Surface mesh to analyze
+            delta: Cube side length
+            domain: Optional custom domain (defaults to mesh bounding box)
+
+        Returns:
+            (measures, n_occupied, grid_tests): Best measures array, count, and number of offsets tested
+        """
+        if domain is None:
+            domain = mesh.bbox
+
+        offset_fracs = self._get_grid_offsets(delta)
+        best_n = float('inf')
+        best_measures = np.array([])
+        grid_tests = 0
+
+        # Precompute data for GPU path
+        if self._use_gpu:
+            all_verts = mesh.get_all_triangle_vertices().astype(np.float64)
+            areas = mesh.triangle_areas().astype(np.float64)
+            domain_max = np.array([domain.max_x, domain.max_y, domain.max_z],
+                                  dtype=np.float64)
+
+        for dx_frac in offset_fracs:
+            for dy_frac in offset_fracs:
+                for dz_frac in offset_fracs:
+                    grid_tests += 1
+                    ox = domain.min_x + dx_frac * delta
+                    oy = domain.min_y + dy_frac * delta
+                    oz = domain.min_z + dz_frac * delta
+
+                    if self._use_gpu:
+                        d_min = np.array([ox, oy, oz], dtype=np.float64)
+                        measures, n_occ = compute_cube_measures_gpu(
+                            all_verts, areas, delta, d_min, domain_max,
+                            measure=self.measure)
+                    else:
+                        shifted_domain = BoundingBox3D(
+                            min_x=ox, max_x=domain.max_x,
+                            min_y=oy, max_y=domain.max_y,
+                            min_z=oz, max_z=domain.max_z)
+                        measures, n_occ = self.compute_cube_measures(
+                            mesh, delta, domain=shifted_domain)
+
+                    if n_occ < best_n:
+                        best_n = n_occ
+                        best_measures = measures.copy()
+
+        return best_measures, best_n, grid_tests
+
     def compute_multifractal_spectrum(
         self,
         mesh: TriangleMesh,
@@ -312,6 +388,7 @@ class MultifractalAnalyzer3D:
         num_scales: int = 12,
         min_delta: Optional[float] = None,
         max_delta: Optional[float] = None,
+        cube_sizes: Optional[np.ndarray] = None,
         rt_physics=None,
     ) -> MultifractalResult3D:
         """
@@ -324,6 +401,9 @@ class MultifractalAnalyzer3D:
             num_scales: Number of scales to analyze
             min_delta: Minimum cube size (default: char_length / 200)
             max_delta: Maximum cube size (default: char_length / 2)
+            cube_sizes: Pre-computed cube sizes (overrides delta_factor/num_scales/
+                min_delta/max_delta). Use to share exact scales with monofractal
+                Phase 1 so that D_q(0) matches the box-counting dimension.
             rt_physics: Optional RTPhysics3D instance for nondimensional cube sizes
 
         Returns:
@@ -335,20 +415,27 @@ class MultifractalAnalyzer3D:
 
         char_len = mesh.bbox.characteristic_length
 
-        if min_delta is None:
-            min_delta = char_len / 200
-        if max_delta is None:
-            max_delta = char_len / 10
+        if cube_sizes is not None:
+            # Use pre-computed scales (e.g. from Phase 1 monofractal analysis)
+            cube_sizes = np.asarray(cube_sizes, dtype=np.float64)
+            # Ensure sorted large-to-small
+            cube_sizes = np.sort(cube_sizes)[::-1]
+        else:
+            if min_delta is None:
+                min_delta = char_len / 200
+            if max_delta is None:
+                max_delta = char_len / 10
 
-        # Generate geometric sequence of cube sizes (large to small)
-        cube_sizes = []
-        delta = max_delta
-        for _ in range(num_scales):
-            if delta < min_delta:
-                break
-            cube_sizes.append(delta)
-            delta /= delta_factor
-        cube_sizes = np.array(cube_sizes)
+            # Generate geometric sequence of cube sizes (large to small)
+            cube_sizes_list = []
+            delta = max_delta
+            for _ in range(num_scales):
+                if delta < min_delta:
+                    break
+                cube_sizes_list.append(delta)
+                delta /= delta_factor
+            cube_sizes = np.array(cube_sizes_list)
+
         n_scales = len(cube_sizes)
 
         if n_scales < 3:
@@ -361,14 +448,19 @@ class MultifractalAnalyzer3D:
         self._log(f"  Mesh: {mesh.n_triangles} triangles, "
                   f"bbox: {mesh.bbox.width:.4f} x {mesh.bbox.height:.4f} x {mesh.bbox.depth:.4f}")
 
-        # Step 1: Compute measures at each scale
+        # Step 1: Compute measures at each scale with grid optimization
         all_probabilities = []
         n_occupied_list = []
         t_start = time.time()
 
+        self._log("  Cube counting with grid optimization:")
+        self._log("    Scale |   delta    |  N_occ  | Offsets | Time")
+        self._log("    " + "-" * 55)
+
         for s_idx, delta in enumerate(cube_sizes):
             t0 = time.time()
-            measures, n_occ = self.compute_cube_measures(mesh, delta)
+            measures, n_occ, grid_tests = self.compute_cube_measures_grid_optimized(
+                mesh, delta)
             n_occupied_list.append(n_occ)
 
             if measures.size > 0:
@@ -378,8 +470,8 @@ class MultifractalAnalyzer3D:
                 probabilities = np.array([])
 
             all_probabilities.append(probabilities)
-            self._log(f"  Scale {s_idx+1}/{n_scales}: delta={delta:.6f}, "
-                      f"occupied={n_occ}, dt={time.time()-t0:.1f}s")
+            dt = time.time() - t0
+            self._log(f"    {s_idx+1:>5}/{n_scales}: {delta:.6f}  | {n_occ:>7} | {grid_tests:>7} | {dt:.1f}s")
 
         self._log(f"  Cube counting total: {time.time()-t_start:.1f}s")
 
@@ -389,25 +481,9 @@ class MultifractalAnalyzer3D:
 
         for q_idx, q in enumerate(q_values):
             if abs(q - 1.0) < 1e-8:
-                # q=1: information dimension via L'Hopital's rule
-                # D_1 = lim_{eps->0} H(eps) / ln(1/eps)
-                # H(eps) = -sum(p_i * ln(p_i))
-                # Regress H vs ln(eps): slope gives D_1 = -slope
-                entropy = np.full(n_scales, np.nan)
-                for s, probs in enumerate(all_probabilities):
-                    if probs.size > 0:
-                        mask = probs > 1e-15
-                        if np.any(mask):
-                            entropy[s] = -np.sum(probs[mask] * np.log(probs[mask]))
-
-                valid = ~np.isnan(entropy)
-                if np.sum(valid) >= 3:
-                    log_eps = np.log(cube_sizes[valid])
-                    slope, _, r_val, _, _ = stats.linregress(log_eps, entropy[valid])
-                    # tau(1) = 0 by definition (Z_1 = 1)
-                    taus[q_idx] = 0.0
-                    r_squared[q_idx] = r_val ** 2
-                    self._D1_direct = -slope
+                # tau(1) = 0 exactly (Z_1 = sum(p_i) = 1 for all scales)
+                taus[q_idx] = 0.0
+                r_squared[q_idx] = 1.0
             else:
                 # General q: Z_q(epsilon) = sum(p_i^q)
                 Z_q = np.full(n_scales, np.nan)
@@ -425,55 +501,123 @@ class MultifractalAnalyzer3D:
                     taus[q_idx] = slope
                     r_squared[q_idx] = r_val ** 2
 
-        # Step 3: Generalized dimensions D_q = tau(q) / (q - 1)
-        Dq = np.full(len(q_values), np.nan)
-        for i, q in enumerate(q_values):
-            if np.isnan(taus[i]):
-                continue
-            if abs(q - 1.0) < 1e-8:
-                Dq[i] = self._D1_direct
-            else:
-                Dq[i] = taus[i] / (q - 1)
+        # Step 3: Enforce convexity on tau(q) and derive D_q
+        # Individual tau(q) regressions can violate convexity due to fitting noise,
+        # causing D_1 > D_0 (violates Renyi inequality D_0 >= D_1 >= D_2).
+        # Fix: project tau(q) onto nearest convex function via constrained optimization,
+        # then derive all D_q from the convex tau.
+        from scipy.optimize import minimize as sp_minimize
+        from scipy.interpolate import UnivariateSpline
 
-        # Step 4: Singularity spectrum f(alpha) via Legendre transform
+        Dq = np.full(len(q_values), np.nan)
         alpha = np.full(len(q_values), np.nan)
         f_alpha_arr = np.full(len(q_values), np.nan)
 
-        # Spline fit for smooth derivatives (matching 2D analyzer)
-        valid_mask = ~np.isnan(taus)
-        if np.sum(valid_mask) >= 4:
-            q_valid = q_values[valid_mask]
-            tau_valid = taus[valid_mask]
+        valid_tau = ~np.isnan(taus)
+        n_valid = np.sum(valid_tau)
 
-            from scipy.interpolate import UnivariateSpline
+        if n_valid >= 4:
+            # Enforce convexity only for q >= 0 where partition functions are stable.
+            # Negative-q values are sensitive to near-zero probabilities and often
+            # produce wildly non-convex tau(q); including them collapses the optimizer.
+            mask_pos = (q_values >= -1e-10) & valid_tau
+            q_pos = q_values[mask_pos]
+            tau_pos_raw = taus[mask_pos].copy()
+            n_pos = len(q_pos)
+
+            if n_pos >= 3:
+                # Pin tau(0) and tau(1) to their raw values:
+                # tau(0) = -D_boxcount (validated by Phase 1)
+                # tau(1) = 0 (exact by definition)
+                q0_pos_idx = np.argmin(np.abs(q_pos - 0.0))
+                has_q0 = abs(q_pos[q0_pos_idx]) < 1e-8
+                q1_pos_idx = np.argmin(np.abs(q_pos - 1.0))
+                has_q1 = abs(q_pos[q1_pos_idx] - 1.0) < 1e-8
+
+                def _objective(tau):
+                    return np.sum((tau - tau_pos_raw) ** 2)
+
+                constraints = []
+                # Convexity: successive slopes must be non-increasing
+                for k in range(n_pos - 2):
+                    dq0 = q_pos[k + 1] - q_pos[k]
+                    dq1 = q_pos[k + 2] - q_pos[k + 1]
+                    def _conv(tau, k=k, dq0=dq0, dq1=dq1):
+                        return (tau[k + 1] - tau[k]) / dq0 - (tau[k + 2] - tau[k + 1]) / dq1
+                    constraints.append({'type': 'ineq', 'fun': _conv})
+
+                # Pin tau(0) to raw value (preserves D0 = Phase 1 box-counting D)
+                if has_q0:
+                    raw_tau0 = float(tau_pos_raw[q0_pos_idx])
+                    constraints.append({'type': 'eq',
+                                        'fun': lambda tau, idx=q0_pos_idx, val=raw_tau0: tau[idx] - val})
+
+                if has_q1:
+                    constraints.append({'type': 'eq',
+                                        'fun': lambda tau, idx=q1_pos_idx: tau[idx]})
+
+                try:
+                    result = sp_minimize(_objective, tau_pos_raw, constraints=constraints,
+                                         method='SLSQP', options={'maxiter': 500, 'ftol': 1e-14})
+                    if result.success:
+                        tau_pos = result.x
+                        adj = np.max(np.abs(tau_pos - tau_pos_raw))
+                        # Write convex values back for q >= 0 only
+                        taus[mask_pos] = tau_pos
+                        if adj > 1e-6:
+                            self._log(f"  Convexity adjustment (q>=0): max |Δτ| = {adj:.6f}")
+                    else:
+                        self._log(f"  Warning: convexity optimization did not converge, using raw tau")
+                except Exception as e:
+                    self._log(f"  Warning: convexity enforcement failed ({e}), using raw tau")
+
+            # Compute D_q from convex tau
+            for i, q in enumerate(q_values):
+                if np.isnan(taus[i]):
+                    continue
+                if abs(q - 1.0) < 1e-8:
+                    # D_1 = d(tau)/dq at q=1 via central finite difference
+                    if i > 0 and i < len(q_values) - 1:
+                        if not np.isnan(taus[i - 1]) and not np.isnan(taus[i + 1]):
+                            Dq[i] = (taus[i + 1] - taus[i - 1]) / \
+                                     (q_values[i + 1] - q_values[i - 1])
+                else:
+                    Dq[i] = taus[i] / (q - 1)
+
+            # Step 4: Singularity spectrum f(alpha) via Legendre transform
+            # Use spline on convex tau for smooth derivatives
+            q_valid = q_values[valid_tau]
+            tau_valid = taus[valid_tau]
             try:
                 spline = UnivariateSpline(q_valid, tau_valid, k=3, s=0)
                 dtau_dq = spline.derivative()(q_valid)
-
                 j = 0
                 for i in range(len(q_values)):
-                    if valid_mask[i]:
+                    if valid_tau[i]:
                         alpha[i] = dtau_dq[j]
                         f_alpha_arr[i] = q_values[i] * alpha[i] - taus[i]
                         j += 1
             except Exception:
-                # Fallback: finite differences
+                # Fallback: finite differences on convex tau
                 for i in range(len(q_values)):
                     if np.isnan(taus[i]):
                         continue
-                    # alpha = d(tau)/dq
                     if 0 < i < len(q_values) - 1:
-                        if not np.isnan(taus[i-1]) and not np.isnan(taus[i+1]):
-                            alpha[i] = (taus[i+1] - taus[i-1]) / (q_values[i+1] - q_values[i-1])
-                    elif i == 0:
-                        if not np.isnan(taus[i+1]):
-                            alpha[i] = (taus[i+1] - taus[i]) / (q_values[i+1] - q_values[i])
-                    else:
-                        if not np.isnan(taus[i-1]):
-                            alpha[i] = (taus[i] - taus[i-1]) / (q_values[i] - q_values[i-1])
-
+                        if not np.isnan(taus[i - 1]) and not np.isnan(taus[i + 1]):
+                            alpha[i] = (taus[i + 1] - taus[i - 1]) / \
+                                        (q_values[i + 1] - q_values[i - 1])
+                    elif i == 0 and not np.isnan(taus[i + 1]):
+                        alpha[i] = (taus[i + 1] - taus[i]) / (q_values[i + 1] - q_values[i])
+                    elif i == len(q_values) - 1 and not np.isnan(taus[i - 1]):
+                        alpha[i] = (taus[i] - taus[i - 1]) / (q_values[i] - q_values[i - 1])
                     if not np.isnan(alpha[i]):
                         f_alpha_arr[i] = q_values[i] * alpha[i] - taus[i]
+        else:
+            # Too few valid points — raw computation, no convexity enforcement
+            for i, q in enumerate(q_values):
+                if np.isnan(taus[i]) or abs(q - 1.0) < 1e-8:
+                    continue
+                Dq[i] = taus[i] / (q - 1)
 
         # Step 5: Extract key dimensions
         def _get_Dq(q_target):

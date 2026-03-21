@@ -23,6 +23,12 @@ except ImportError:
         return decorator
     prange = range
 
+# Try to import GPU acceleration
+try:
+    from .fast_counting_gpu import HAS_CUDA, count_cubes_gpu
+except ImportError:
+    HAS_CUDA = False
+
 
 @jit(nopython=True, cache=True)
 def _triangle_cube_intersection_numba(
@@ -238,13 +244,20 @@ def _count_cubes_numba(
 
 class FastCubeCounter:
     """
-    High-performance cube counter using Numba JIT compilation.
+    High-performance cube counter using Numba JIT compilation or CUDA GPU.
 
-    Falls back to pure NumPy if Numba is not available.
+    Falls back to pure NumPy if neither Numba nor CUDA is available.
     """
 
-    def __init__(self, mesh: TriangleMesh):
-        """Initialize with mesh."""
+    def __init__(self, mesh: TriangleMesh, use_gpu: str = 'auto'):
+        """
+        Initialize with mesh.
+
+        Args:
+            mesh: TriangleMesh to analyze
+            use_gpu: 'auto' (use GPU if available), 'always' (error if no GPU),
+                     or 'never' (CPU only)
+        """
         self.mesh = mesh
         self._triangle_vertices = mesh.get_all_triangle_vertices().astype(np.float64)
         self._domain_min = np.array([
@@ -254,10 +267,19 @@ class FastCubeCounter:
             mesh.bbox.max_x, mesh.bbox.max_y, mesh.bbox.max_z
         ], dtype=np.float64)
 
+        if use_gpu == 'always' and not HAS_CUDA:
+            raise RuntimeError("GPU requested but CUDA is not available")
+        if use_gpu == 'auto':
+            self._use_gpu = HAS_CUDA
+        elif use_gpu == 'always':
+            self._use_gpu = True
+        else:
+            self._use_gpu = False
+
     def count_cubes(self, delta: float,
                     domain: Optional[BoundingBox3D] = None) -> BoxCountResult:
         """
-        Count cubes using Numba-accelerated algorithm.
+        Count cubes using the best available backend (GPU > Numba > Python).
 
         Args:
             delta: Cube side length
@@ -267,12 +289,26 @@ class FastCubeCounter:
             BoxCountResult
         """
         if domain is not None:
-            domain_min = np.array([domain.min_x, domain.min_y, domain.min_z])
-            domain_max = np.array([domain.max_x, domain.max_y, domain.max_z])
+            domain_min = np.array([domain.min_x, domain.min_y, domain.min_z],
+                                  dtype=np.float64)
+            domain_max = np.array([domain.max_x, domain.max_y, domain.max_z],
+                                  dtype=np.float64)
         else:
             domain_min = self._domain_min
             domain_max = self._domain_max
 
+        # GPU path
+        if self._use_gpu:
+            n_occupied, nx, ny, nz = count_cubes_gpu(
+                self._triangle_vertices, delta, domain_min, domain_max
+            )
+            return BoxCountResult(
+                delta=delta,
+                n_boxes=n_occupied,
+                grid_dims=(nx, ny, nz)
+            )
+
+        # CPU Numba path
         if HAS_NUMBA:
             results, counts, nx, ny, nz = _count_cubes_numba(
                 self._triangle_vertices, delta, domain_min, domain_max
@@ -291,15 +327,16 @@ class FastCubeCounter:
                 n_boxes=len(occupied),
                 grid_dims=(nx, ny, nz)
             )
-        else:
-            # Fallback to Python implementation
-            from .box_counting_3d import CubeCounter
-            counter = CubeCounter(self.mesh)
-            return counter.count_cubes(delta, domain)
+
+        # Fallback to Python implementation
+        from .box_counting_3d import CubeCounter
+        counter = CubeCounter(self.mesh)
+        return counter.count_cubes(delta, domain)
 
 
 def count_cubes_fast(mesh: TriangleMesh, delta: float,
-                     domain: Optional[BoundingBox3D] = None) -> BoxCountResult:
+                     domain: Optional[BoundingBox3D] = None,
+                     use_gpu: str = 'auto') -> BoxCountResult:
     """
     Convenience function for fast cube counting.
 
@@ -307,14 +344,20 @@ def count_cubes_fast(mesh: TriangleMesh, delta: float,
         mesh: TriangleMesh to analyze
         delta: Cube side length
         domain: Optional custom domain
+        use_gpu: 'auto', 'always', or 'never'
 
     Returns:
         BoxCountResult
     """
-    counter = FastCubeCounter(mesh)
+    counter = FastCubeCounter(mesh, use_gpu=use_gpu)
     return counter.count_cubes(delta, domain)
 
 
 def check_numba_available() -> bool:
     """Check if Numba is available for acceleration."""
     return HAS_NUMBA
+
+
+def check_cuda_available() -> bool:
+    """Check if CUDA GPU acceleration is available."""
+    return HAS_CUDA

@@ -273,7 +273,8 @@ def compute_fractal_dimension_3d(mesh: TriangleMesh,
                                   delta_factor: float = 1.5,
                                   num_steps: int = 15,
                                   min_delta: Optional[float] = None,
-                                  max_delta: Optional[float] = None) -> FractalDimensionResult:
+                                  max_delta: Optional[float] = None,
+                                  use_gpu: str = 'auto') -> FractalDimensionResult:
     """
     Compute fractal dimension of a 3D surface using cube counting.
 
@@ -290,6 +291,7 @@ def compute_fractal_dimension_3d(mesh: TriangleMesh,
         num_steps: Number of scales to analyze (default: 15)
         min_delta: Minimum cube size (default: characteristic_length / 500)
         max_delta: Maximum cube size (default: characteristic_length)
+        use_gpu: 'auto' (GPU if available), 'always', or 'never'
 
     Returns:
         FractalDimensionResult with dimension estimate and statistics
@@ -321,15 +323,45 @@ def compute_fractal_dimension_3d(mesh: TriangleMesh,
     if len(deltas) < 3:
         raise ValueError(f"Insufficient scale range: only {len(deltas)} valid delta values")
 
-    # Count cubes at each scale
-    counter = CubeCounter(mesh)
+    # Count cubes at each scale using grid-optimized counting
+    # (multiple offsets, take minimum count — matches multifractal Phase 2)
+    from .fast_counting import FastCubeCounter
+    counter = FastCubeCounter(mesh, use_gpu=use_gpu)
+    bbox = mesh.bbox
     n_boxes = []
 
     for delta in deltas:
-        result = counter.count_cubes(delta)
-        n_boxes.append(result.n_boxes)
-        print(f"  δ = {delta:.6f}: {result.n_boxes} cubes "
-              f"(grid: {result.grid_dims[0]}×{result.grid_dims[1]}×{result.grid_dims[2]})")
+        # Adaptive offsets: more offsets at finer scales (same as multifractal)
+        if delta < 0.005:
+            offset_fracs = np.linspace(0, 0.75, 4)  # 4^3 = 64 tests
+        elif delta < 0.02:
+            offset_fracs = np.linspace(0, 0.5, 3)   # 3^3 = 27 tests
+        else:
+            offset_fracs = np.linspace(0, 0.5, 2)   # 2^3 = 8 tests
+
+        best_n = float('inf')
+        best_dims = (0, 0, 0)
+        grid_tests = 0
+        for dx_frac in offset_fracs:
+            for dy_frac in offset_fracs:
+                for dz_frac in offset_fracs:
+                    grid_tests += 1
+                    shifted = BoundingBox3D(
+                        min_x=bbox.min_x + dx_frac * delta,
+                        max_x=bbox.max_x,
+                        min_y=bbox.min_y + dy_frac * delta,
+                        max_y=bbox.max_y,
+                        min_z=bbox.min_z + dz_frac * delta,
+                        max_z=bbox.max_z)
+                    result = counter.count_cubes(delta, domain=shifted)
+                    if result.n_boxes < best_n:
+                        best_n = result.n_boxes
+                        best_dims = result.grid_dims
+
+        n_boxes.append(best_n)
+        print(f"  δ = {delta:.6f}: {best_n} cubes "
+              f"(grid: {best_dims[0]}×{best_dims[1]}×{best_dims[2]}) "
+              f"[{grid_tests} offsets]")
 
     # Filter out zero counts
     valid_mask = np.array(n_boxes) > 0
