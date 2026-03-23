@@ -371,23 +371,84 @@ def compute_fractal_dimension_3d(mesh: TriangleMesh,
     deltas = np.array(deltas)[valid_mask]
     n_boxes = np.array(n_boxes)[valid_mask]
 
-    # Linear regression in log-log space
+    # Log-log space
     log_inv_delta = np.log(1.0 / deltas)
     log_n_boxes = np.log(n_boxes)
 
-    slope, intercept, r_value, p_value, std_err = stats.linregress(
-        log_inv_delta, log_n_boxes
-    )
+    # Enhanced boundary removal: detect and trim scales where the
+    # log-log slope deviates significantly from the middle region
+    if len(deltas) > 8:
+        n = len(log_inv_delta)
+        seg_size = max(3, n // 4)
+        if n >= 3 * seg_size:
+            try:
+                sl_first, _, r2_first, _, _ = stats.linregress(
+                    log_inv_delta[:seg_size], log_n_boxes[:seg_size])
+                sl_mid, _, r2_mid, _, _ = stats.linregress(
+                    log_inv_delta[seg_size:2*seg_size], log_n_boxes[seg_size:2*seg_size])
+                sl_last, _, r2_last, _, _ = stats.linregress(
+                    log_inv_delta[-seg_size:], log_n_boxes[-seg_size:])
+                trim_start, trim_end = 0, 0
+                if sl_mid != 0:
+                    if abs(sl_first - sl_mid) / abs(sl_mid) > 0.15 or r2_first < 0.95:
+                        trim_start = 1
+                    if abs(sl_last - sl_mid) / abs(sl_mid) > 0.15 or r2_last < 0.95:
+                        trim_end = 1
+                if (trim_start or trim_end) and n > (trim_start + trim_end) + 5:
+                    deltas = deltas[trim_start:n - trim_end if trim_end else n]
+                    n_boxes = n_boxes[trim_start:n - trim_end if trim_end else n]
+                    log_inv_delta = log_inv_delta[trim_start:n - trim_end if trim_end else n]
+                    log_n_boxes = log_n_boxes[trim_start:n - trim_end if trim_end else n]
+            except Exception:
+                pass
+
+    # Find optimal scaling region: sliding window, select best R² × range
+    best_score = -1.0
+    best_slope, best_err, best_r2 = np.nan, np.nan, 0.0
+    best_start, best_end = 0, len(log_inv_delta)
+    min_pts = min(5, len(log_inv_delta))
+
+    for n_pts in range(min_pts, len(log_inv_delta) + 1):
+        for start in range(len(log_inv_delta) - n_pts + 1):
+            end = start + n_pts
+            x = log_inv_delta[start:end]
+            y = log_n_boxes[start:end]
+            sl, _, rv, _, se = stats.linregress(x, y)
+            r2 = rv ** 2
+            scaling_range = abs(x[-1] - x[0])
+            if r2 >= 0.97 and scaling_range >= 1.0:
+                score = r2 * scaling_range
+                if score > best_score:
+                    best_score = score
+                    best_slope = sl
+                    best_err = se
+                    best_r2 = r2
+                    best_start = start
+                    best_end = end
+
+    if np.isnan(best_slope):
+        # Fallback: use all data
+        best_slope, intercept, rv, _, best_err = stats.linregress(
+            log_inv_delta, log_n_boxes)
+        best_r2 = rv ** 2
+        best_start = 0
+        best_end = len(log_inv_delta)
+    else:
+        _, intercept, _, _, _ = stats.linregress(
+            log_inv_delta[best_start:best_end], log_n_boxes[best_start:best_end])
+
+    fit_deltas = deltas[best_start:best_end]
+    fit_nboxes = n_boxes[best_start:best_end]
 
     return FractalDimensionResult(
-        dimension=slope,
-        r_squared=r_value ** 2,
-        std_error=std_err,
+        dimension=best_slope,
+        r_squared=best_r2,
+        std_error=best_err,
         intercept=intercept,
-        deltas=deltas.tolist(),
-        n_boxes=n_boxes.tolist(),
-        log_inv_delta=log_inv_delta,
-        log_n_boxes=log_n_boxes,
+        deltas=fit_deltas.tolist(),
+        n_boxes=fit_nboxes.tolist(),
+        log_inv_delta=log_inv_delta[best_start:best_end],
+        log_n_boxes=log_n_boxes[best_start:best_end],
     )
 
 
